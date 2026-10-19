@@ -1,0 +1,3 @@
+# EVA core dependencies (add more as each stage needs them)
+PySide6
+python-dotenv

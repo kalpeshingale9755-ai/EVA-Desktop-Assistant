@@ -1,0 +1,5 @@
+# Stage 2B: voice input. Install with:  pip install -r requirements_voice.txt
+faster-whisper
+sounddevice
+numpy
+pynput
