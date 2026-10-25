@@ -17,7 +17,8 @@ class UnderstandTests(unittest.TestCase):
 
     def test_hey_eva_makes_a_command(self):
         for text in ("Hey EVA open notepad", "hey eva, open notepad",
-                     "Hey! Eva open notepad", "HEY EVA: open notepad"):
+                     "Hey! Eva open notepad", "HEY EVA: open notepad",
+                     "eva open notepad", "EVA, open notepad"):
             r = understand(text, InputSource.VOICE)
             self.assertEqual(r.mode, Mode.COMMAND_MODE, text)
             self.assertEqual(r.clean_text, "open notepad", text)
@@ -28,7 +29,7 @@ class UnderstandTests(unittest.TestCase):
 
     def test_normal_sentence_is_conversation(self):
         for text in ("open notepad", "tell me a joke", "how are you",
-                     "what time is it", "eva open notepad"):
+                     "what time is it"):
             r = understand(text, InputSource.TEXT)
             self.assertEqual(r.mode, Mode.CONVERSATION_MODE, text)
             self.assertEqual(r.clean_text, text, text)

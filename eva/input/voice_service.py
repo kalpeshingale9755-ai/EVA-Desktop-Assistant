@@ -3,6 +3,9 @@
 Heavy work runs in a background thread, so the window never freezes.
 Phases: idle -> listening -> processing -> idle. Every path ends back at idle.
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 import threading
 import time
 
@@ -15,7 +18,11 @@ from eva.input.hotkey import HotkeyListener
 from eva.input.speech_to_text import SpeechToText, SttError
 from eva.input.voice_logic import is_junk
 from eva.input.voice_settings import VoiceSettings
+from eva.input.wake_ack import WakeAckFlow
 from eva.ui.state_manager import StateManager
+
+if TYPE_CHECKING:
+    from eva.response.speaker import Speaker
 
 log = get_logger("eva.voice")
 
@@ -66,13 +73,16 @@ class _VoiceJob(QThread):
 
 class VoiceInputService(QObject):
     text_ready = Signal(str, object)   # what you said, confidence (float or None)
+    command_ready = Signal(str, object)  # what you said AFTER "Yes boss" (always a command)
     message = Signal(str)              # short status for the UI ("I didn't catch that.")
 
     def __init__(self, states: StateManager, settings: VoiceSettings,
+                 speaker: Speaker | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._states = states
         self._settings = settings
+        self._speaker = speaker
         self._stt = SpeechToText(settings)
         self._hotkey = HotkeyListener(settings.hotkey, self)
         self._hotkey.pressed.connect(self._on_hotkey, Qt.ConnectionType.QueuedConnection)
@@ -82,15 +92,27 @@ class VoiceInputService(QObject):
         self._jobs: set[_VoiceJob] = set()   # keeps running threads alive until they finish
         self._last_press = 0.0
 
+        # "Eva" alone -> she says "Yes boss." -> listens for the command
+        self._ack = WakeAckFlow(
+            speak=self._speak_ack,
+            schedule=QTimer.singleShot,
+            start_listening=self._start_followup,
+            on_waiting=lambda: self._states.set_state(InterfaceState.WAKING),
+            ack_text=settings.ack_text,
+            settle_ms=settings.ack_settle_ms,
+            fallback_ms=settings.ack_fallback_ms,
+        )
+
     # ---- start / stop ----------------------------------------------------
     def start(self) -> bool:
         """Start the hotkey. Returns False if voice input cannot work."""
         ok = self._hotkey.start()
-        if ok and self._settings.preload_model:
+        if ok and self._settings.preload_model and self._stt.needs_preload:
             threading.Thread(target=self._preload, name="eva-stt-preload", daemon=True).start()
         return ok
 
     def shutdown(self) -> None:
+        self._ack.cancel()
         self._hotkey.stop()
         self._cancel.set()
         for job in list(self._jobs):
@@ -109,6 +131,10 @@ class VoiceInputService(QObject):
             return
         self._last_press = now
 
+        self._ack.cancel()               # BEFORE stopping her voice, or "finished" would start a second recording
+        if self._speaker is not None:
+            self._speaker.stop()
+
         if self._phase == "idle":
             self._begin()
         elif self._phase == "listening":
@@ -117,21 +143,45 @@ class VoiceInputService(QObject):
         else:
             log.info("Hotkey ignored: still processing the last command")
 
-    def _begin(self) -> None:
+    # ---- wake word + "Yes boss" ---------------------------------------------------
+    @property
+    def ack_active(self) -> bool:
+        """True while EVA is saying "Yes boss" or about to listen for the command."""
+        return self._ack.active
+
+    def wake_ack(self) -> None:
+        """The person said only the wake word. Answer, then listen for the command."""
+        self._ack.begin()
+
+    def notify_speech_ended(self) -> None:
+        """Call when EVA's voice finishes (from the speaker's 'ended' signal)."""
+        self._ack.speech_ended()
+
+    def _speak_ack(self, text: str) -> bool:
+        return self._speaker is not None and self._speaker.speak(text)
+
+    def _start_followup(self) -> None:
+        if self._phase == "idle":
+            self._begin(followup=True)
+        else:
+            log.info("Follow-up listening skipped: voice input is busy (%s)", self._phase)
+
+    def _begin(self, followup: bool = False) -> None:
         self._phase = "listening"
         self._cancel = threading.Event()
         self._states.set_state(InterfaceState.LISTENING)
 
         job = _VoiceJob(self._settings, self._stt, self._cancel)
         job.recorded.connect(self._on_recorded)
-        job.no_speech.connect(lambda: self._finish("I didn't hear anything."))
+        job.no_speech.connect(lambda: self._finish(
+            "I didn't hear a command." if followup else "I didn't hear anything."))
         job.cancelled.connect(lambda: self._finish("Listening cancelled."))
         job.nothing_heard.connect(lambda: self._finish("I didn't catch that."))
-        job.heard.connect(self._on_heard)
+        job.heard.connect(lambda text, conf, f=followup: self._on_heard(text, conf, f))
         job.failed.connect(self._on_failed)
         job.finished.connect(lambda j=job: self._jobs.discard(j))
         self._jobs.add(job)
-        log.info("Listening...")
+        log.info("Listening for the command..." if followup else "Listening...")
         job.start()
 
     # ---- results (all run on the main thread) -------------------------------
@@ -139,9 +189,9 @@ class VoiceInputService(QObject):
         self._phase = "processing"
         self._states.set_state(InterfaceState.PROCESSING)
 
-    def _on_heard(self, text: str, confidence) -> None:
+    def _on_heard(self, text: str, confidence, followup: bool = False) -> None:
         self._finish(None)
-        self.text_ready.emit(text, confidence)
+        (self.command_ready if followup else self.text_ready).emit(text, confidence)
 
     def _finish(self, status: str | None) -> None:
         self._phase = "idle"
