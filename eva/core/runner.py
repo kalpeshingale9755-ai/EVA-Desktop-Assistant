@@ -40,6 +40,9 @@ class CoreRunner(QObject):
     def submit(self, request: RequestObject) -> None:
         self._queue.put(request)
 
+    def cancel(self) -> None:
+        self.core.cancel()
+
     def shutdown(self) -> None:
         self._queue.put(_STOP)
         self._thread.join(timeout=3)

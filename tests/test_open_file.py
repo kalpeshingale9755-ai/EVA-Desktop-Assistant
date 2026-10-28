@@ -413,11 +413,13 @@ class CoreIntegrationTests(Tmp):
         probe.list_windows = lambda: []
         register_default_capabilities(reg, probe=probe, app_settings=AppSettings(data_dir=str(self.base / "data")),
                                       file_settings=settings_for(self.base), refresh_apps=False)
-        self.assertEqual(reg.names(), ["open_app", "open_file", "close_app", "clock"])
+        self.assertEqual(reg.names(), ["open_app", "open_file", "close_app", "open_url", "web_search",
+                                       "tell_time", "tell_date", "battery_status",
+                                       "volume_up", "volume_down", "volume_mute", "take_screenshot"])
         file_cap = [c for c in reg._capabilities if c.name == "open_file"][0]
         file_cap._index.refresh()
         for phrase, expected in [("open notepad", ["open_app"]), ("close notepad", ["close_app"]),
-                                 ("what time is it", ["clock"]), ("open resume pdf", ["open_file"]),
+                                 ("what time is it", ["tell_time"]), ("open resume pdf", ["open_file"]),
                                  ("open downloads folder", ["open_file"])]:
             found = [c.name for c, _ in reg.find(req(phrase))]
             self.assertEqual(found, expected, phrase)

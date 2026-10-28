@@ -74,5 +74,50 @@ class ClockWithCoreTests(unittest.TestCase):
         self.assertIsNone(ClockCapability().match(req("open spotify")))
 
 
+class WebCapabilitiesTests(unittest.TestCase):
+    def test_open_url_capability_match_and_execute(self):
+        from eva.capabilities.web_actions import OpenUrlCapability
+        opened = []
+        cap = OpenUrlCapability(opener=lambda u: opened.append(u) or True)
+
+        self.assertEqual(cap.match(req("open youtube")), {"url": "https://www.youtube.com"})
+        self.assertIsNone(cap.match(req("open spotify")))
+
+        res = cap.execute({"url": "https://www.youtube.com"})
+        self.assertEqual(res.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(opened, ["https://www.youtube.com"])
+        self.assertEqual(res.message, "Opening www.youtube.com.")
+
+    def test_web_search_capability_match_and_execute(self):
+        from eva.capabilities.web_actions import WebSearchCapability
+        opened = []
+        cap = WebSearchCapability(opener=lambda u: opened.append(u) or True)
+
+        self.assertEqual(cap.match(req("search for python tutorials")), {"query": "python tutorials"})
+        self.assertIsNone(cap.match(req("open spotify")))
+
+        res = cap.execute({"query": "python tutorials"})
+        self.assertEqual(res.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].startswith("https://www.google.com/search?q=python"))
+        self.assertEqual(res.message, "Searching for python tutorials.")
+
+    def test_web_capabilities_end_to_end_with_core(self):
+        from eva.capabilities.web_actions import OpenUrlCapability, WebSearchCapability
+        opened = []
+        reg = CapabilityRegistry()
+        reg.register(OpenUrlCapability(opener=lambda u: opened.append(u) or True))
+        reg.register(WebSearchCapability(opener=lambda u: opened.append(u) or True))
+        core = EvaCore(registry=reg)
+
+        r1 = core.handle(req("go to github.com"))
+        self.assertEqual((r1.outcome, r1.capability), (TaskOutcome.SUCCESS, "open_url"))
+        self.assertEqual(opened[-1], "https://github.com")
+
+        r2 = core.handle(req("google best restaurants"))
+        self.assertEqual((r2.outcome, r2.capability), (TaskOutcome.SUCCESS, "web_search"))
+        self.assertTrue(opened[-1].startswith("https://www.google.com/search?q=best"))
+
+
 if __name__ == "__main__":
     unittest.main()

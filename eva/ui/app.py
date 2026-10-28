@@ -72,6 +72,9 @@ def run_app() -> int:
     # Typed OR spoken text -> Understanding System -> EVA Core.
     def handle_input(raw_text: str, source: InputSource, confidence: float | None = None,
                      force_command: bool = False) -> None:
+        clean_norm = " ".join((raw_text or "").lower().split()).strip(" .,!?")
+        if clean_norm in ("stop", "cancel", "eva stop", "eva cancel", "hey eva stop", "hey eva cancel"):
+            core_runner.cancel()
         request = understand(raw_text, source, confidence, force_command=force_command)
         if request is None:
             window.show_understood("Nothing to do.")

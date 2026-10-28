@@ -23,6 +23,12 @@ class CapabilityRegistry:
     def names(self) -> list[str]:
         return [c.name for c in self._capabilities]
 
+    def get(self, name: str) -> Capability | None:
+        for c in self._capabilities:
+            if c.name == name:
+                return c
+        return None
+
     def __len__(self) -> int:
         return len(self._capabilities)
 

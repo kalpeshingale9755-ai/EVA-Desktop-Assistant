@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from eva.capabilities.app_index import AppIndex
 from eva.capabilities.app_settings import AppSettings
-from eva.capabilities.clock import ClockCapability
 from eva.capabilities.close_app import CloseAppCapability
 from eva.capabilities.file_index import FileIndex
 from eva.capabilities.file_settings import FileSettings
 from eva.capabilities.open_app import OpenAppCapability
 from eva.capabilities.open_file import OpenFileCapability
+from eva.capabilities.quick_actions import register_quick_capabilities
 from eva.capabilities.system_probe import WindowsProbe
+from eva.capabilities.web_actions import OpenUrlCapability, WebSearchCapability
 from eva.core.registry import CapabilityRegistry
 
 
@@ -33,5 +34,7 @@ def register_default_capabilities(registry: CapabilityRegistry, probe=None,
     registry.register(OpenAppCapability(index, probe, settings))
     registry.register(OpenFileCapability(file_index, probe, index, settings, files))
     registry.register(CloseAppCapability(probe, index, settings))
-    registry.register(ClockCapability())
+    registry.register(OpenUrlCapability())
+    registry.register(WebSearchCapability())
+    register_quick_capabilities(registry)
     return index

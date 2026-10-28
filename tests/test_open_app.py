@@ -382,7 +382,9 @@ class CoreIntegrationTests(unittest.TestCase):
         index = register_default_capabilities(reg, probe=FakeProbe(),
                                               app_settings=AppSettings(data_dir=tmp.name),
                                               refresh_apps=False)
-        self.assertEqual(reg.names(), ["open_app", "open_file", "close_app", "clock"])
+        self.assertEqual(reg.names(), ["open_app", "open_file", "close_app", "open_url", "web_search",
+                                       "tell_time", "tell_date", "battery_status",
+                                       "volume_up", "volume_down", "volume_mute", "take_screenshot"])
         self.assertFalse(index.has_system_apps)          # nothing was read, no thread started
 
 

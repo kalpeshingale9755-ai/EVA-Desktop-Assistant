@@ -6,6 +6,9 @@ from eva.core.capability import Capability, CapabilityResult, Risk
 from eva.core.core import EvaCore, run_with_timeout
 from eva.core.registry import CapabilityRegistry
 from eva.core.settings import CoreSettings
+from eva.brain import ArgSpec, Brain, BrainSettings, BrainStatus, CapabilitySpec
+from eva.planner import Planner
+from tests.test_brain import FakeGateway
 from eva.understanding.request import InputSource, RequestObject
 
 S = InterfaceState
@@ -48,6 +51,7 @@ def make_core(*caps, **kw):
     for c in caps:
         reg.register(c)
     states = []
+    kw.setdefault("brain", None)
     core = EvaCore(reg, on_state=states.append, **kw)
     return core, states
 
@@ -208,6 +212,290 @@ class SafetyTests(unittest.TestCase):
             run_with_timeout(lambda: (_ for _ in ()).throw(ValueError("x")), 1)
         with self.assertRaises(TimeoutError):
             run_with_timeout(lambda: time.sleep(1), 0.05)
+
+
+class BrainIntegrationTests(unittest.TestCase):
+    def test_conversation_mode_uses_brain_chat(self):
+        gateway = FakeGateway(reply={"kind": "chat", "capability": None, "args": {}, "confidence": 1.0,
+                                     "reply": "I am EVA, nice to meet you."})
+        brain = Brain(settings=BrainSettings(api_key="k"), gateway=gateway)
+        core = EvaCore(brain=brain)
+        r = core.handle(req("who are you?", mode=Mode.CONVERSATION_MODE))
+        self.assertEqual((r.outcome, r.reason, r.reply),
+                         (TaskOutcome.SUCCESS, "chat", "I am EVA, nice to meet you."))
+
+    def test_local_command_does_not_call_brain(self):
+        gateway = FakeGateway(reply={"kind": "chat", "capability": None, "args": {}, "confidence": 1.0, "reply": "test"})
+        brain = Brain(settings=BrainSettings(api_key="k"), gateway=gateway)
+        reg = CapabilityRegistry()
+        cap = Fake("fake", keyword="notepad")
+        reg.register(cap)
+        core = EvaCore(registry=reg, brain=brain)
+        r = core.handle(req("open notepad"))
+        self.assertEqual(r.reason, "ok")
+        self.assertEqual(len(gateway.calls), 0)
+
+    def test_unmatched_command_uses_brain_action(self):
+        gateway = FakeGateway(reply={"kind": "action", "capability": "fake", "args": {"name": "notepad"},
+                                     "confidence": 0.9, "reply": "Opening notepad."})
+        brain = Brain(settings=BrainSettings(api_key="k"), gateway=gateway,
+                      specs={"fake": CapabilitySpec("fake", "fake cap", {"name": ArgSpec()})})
+        reg = CapabilityRegistry()
+        cap = Fake("fake", keyword="notepad")
+        reg.register(cap)
+        core = EvaCore(registry=reg, brain=brain)
+        r = core.handle(req("launch the writing app"))
+        self.assertEqual((r.outcome, r.capability), (TaskOutcome.SUCCESS, "fake"))
+        self.assertEqual(cap.executed, 1)
+
+    def test_brain_action_permission_gate_checked(self):
+        gateway = FakeGateway(reply={"kind": "action", "capability": "fake", "args": {"name": "notepad"},
+                                     "confidence": 0.9, "reply": "Opening notepad."})
+        brain = Brain(settings=BrainSettings(api_key="k"), gateway=gateway,
+                      specs={"fake": CapabilitySpec("fake", "fake cap", {"name": ArgSpec()})})
+        reg = CapabilityRegistry()
+        cap = Fake("fake", keyword="notepad", risk=Risk.HIGH)
+        reg.register(cap)
+        core = EvaCore(registry=reg, brain=brain)
+        r = core.handle(req("launch the writing app"))
+        self.assertEqual(r.reason, "needs_confirmation")
+        self.assertEqual(cap.executed, 0)
+
+    def test_brain_error_returns_safe_reply(self):
+        from eva.brain.gateway import GatewayTimeout
+        gateway = FakeGateway(error=GatewayTimeout("timed out"))
+        brain = Brain(settings=BrainSettings(api_key="k"), gateway=gateway)
+        core = EvaCore(brain=brain)
+        r = core.handle(req("tell me a long story", mode=Mode.CONVERSATION_MODE))
+        self.assertEqual((r.outcome, r.reason), (TaskOutcome.TIMEOUT, "brain_timeout"))
+        self.assertEqual(r.reply, "That took too long. Please try again.")
+
+
+class PlannerIntegrationTests(unittest.TestCase):
+    def test_local_web_command_open_url_handled_without_planner(self):
+        opened = []
+        reg = CapabilityRegistry()
+        from eva.capabilities.web_actions import OpenUrlCapability, WebSearchCapability
+        reg.register(OpenUrlCapability(opener=lambda u: opened.append(u) or True))
+        gateway = FakeGateway()
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway)
+        core = EvaCore(registry=reg, planner=planner)
+
+        r = core.handle(req("open youtube"))
+        self.assertEqual(r.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(r.capability, "open_url")
+        self.assertEqual(opened, ["https://www.youtube.com"])
+        self.assertEqual(len(gateway.calls), 0)
+
+    def test_local_web_command_web_search_handled_without_planner(self):
+        opened = []
+        reg = CapabilityRegistry()
+        from eva.capabilities.web_actions import OpenUrlCapability, WebSearchCapability
+        reg.register(WebSearchCapability(opener=lambda u: opened.append(u) or True))
+        gateway = FakeGateway()
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway)
+        core = EvaCore(registry=reg, planner=planner)
+
+        r = core.handle(req("search for python tutorials"))
+        self.assertEqual(r.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(r.capability, "web_search")
+        self.assertTrue(opened[0].startswith("https://www.google.com/search?q=python"))
+        self.assertEqual(len(gateway.calls), 0)
+
+    def test_multistep_command_uses_planner_and_plan_runner(self):
+        import json
+        opened = []
+        reg = CapabilityRegistry()
+        from eva.capabilities.web_actions import OpenUrlCapability, WebSearchCapability
+        reg.register(OpenUrlCapability(opener=lambda u: opened.append(u) or True))
+        reg.register(WebSearchCapability(opener=lambda u: opened.append(u) or True))
+
+        plan = {
+            "kind": "plan",
+            "steps": [
+                {"capability": "web_search", "args": {"query": "python tutorials"}},
+                {"capability": "open_url", "args": {"url": "https://www.youtube.com"}},
+            ],
+            "confidence": 0.95,
+            "reply": "Searching for python tutorials and opening YouTube.",
+        }
+        gateway = FakeGateway(reply=json.dumps(plan))
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway)
+        states = []
+        core = EvaCore(registry=reg, planner=planner, on_state=states.append)
+
+        r = core.handle(req("search for python tutorials and open youtube"))
+        self.assertEqual(r.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(r.reason, "ok")
+        self.assertEqual(len(opened), 2)
+        self.assertTrue(opened[0].startswith("https://www.google.com/search?q=python"))
+        self.assertEqual(opened[1], "https://www.youtube.com")
+        self.assertIn(InterfaceState.EXECUTING, states)
+        self.assertIn(InterfaceState.RESPONDING, states)
+
+    def test_planner_plan_with_cancel(self):
+        import json, threading
+        opened = []
+        reg = CapabilityRegistry()
+        from eva.capabilities.web_actions import OpenUrlCapability, WebSearchCapability
+        cancel_ev = threading.Event()
+
+        def opener(u):
+            opened.append(u)
+            cancel_ev.set()  # cancel right after first step
+            return True
+
+        reg.register(WebSearchCapability(opener=opener))
+        reg.register(OpenUrlCapability(opener=opener))
+
+        plan = {
+            "kind": "plan",
+            "steps": [
+                {"capability": "web_search", "args": {"query": "python"}},
+                {"capability": "open_url", "args": {"url": "https://www.youtube.com"}},
+            ],
+            "confidence": 0.95,
+            "reply": "Doing both.",
+        }
+        gateway = FakeGateway(reply=json.dumps(plan))
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway)
+        core = EvaCore(registry=reg, planner=planner)
+
+        r = core.handle(req("search python and open youtube"), cancel=cancel_ev)
+        self.assertEqual(r.outcome, TaskOutcome.PARTIAL)
+        self.assertIn("Stopped", r.reply)
+        self.assertEqual(len(opened), 1)
+
+    def test_planner_risky_plan_refused_without_confirm(self):
+        import json
+        reg = CapabilityRegistry()
+        cap = Fake("danger", keyword="execute_danger", risk=Risk.HIGH)
+        reg.register(cap)
+
+        from eva.brain import CapabilitySpec
+        specs = {"danger": CapabilitySpec("danger", "risky action", needs_confirmation=True)}
+        plan = {
+            "kind": "plan",
+            "steps": [{"capability": "danger", "args": {}}],
+            "confidence": 0.95,
+            "reply": "Doing risky action.",
+        }
+        gateway = FakeGateway(reply=json.dumps(plan))
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway, specs=specs)
+        core = EvaCore(registry=reg, planner=planner)  # confirm is None
+
+        r = core.handle(req("do something else"))
+        self.assertEqual(r.outcome, TaskOutcome.FAILED)
+        self.assertIn("will not do that", r.reply)
+        self.assertEqual(cap.executed, 0)
+
+    def test_planner_risky_plan_allowed_with_confirm(self):
+        import json
+        reg = CapabilityRegistry()
+        cap = Fake("danger", keyword="execute_danger", risk=Risk.HIGH)
+        reg.register(cap)
+
+        from eva.brain import CapabilitySpec
+        specs = {"danger": CapabilitySpec("danger", "risky action", needs_confirmation=True)}
+        plan = {
+            "kind": "plan",
+            "steps": [{"capability": "danger", "args": {}}],
+            "confidence": 0.95,
+            "reply": "Doing risky action.",
+        }
+        gateway = FakeGateway(reply=json.dumps(plan))
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway, specs=specs)
+        core = EvaCore(registry=reg, planner=planner, confirm=lambda q: True)
+
+        r = core.handle(req("do something else"))
+        self.assertEqual(r.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(cap.executed, 1)
+
+    def test_planner_chat_in_conversation_mode(self):
+        import json
+        gateway = FakeGateway(reply=json.dumps({
+            "kind": "chat",
+            "steps": [],
+            "confidence": 0.9,
+            "reply": "The capital of France is Paris.",
+        }))
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway)
+        core = EvaCore(planner=planner)
+
+        r = core.handle(req("what is the capital of France", mode=Mode.CONVERSATION_MODE))
+        self.assertEqual(r.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(r.reason, "chat")
+        self.assertEqual(r.reply, "The capital of France is Paris.")
+
+    def test_local_quick_commands_handled_without_planner(self):
+        from datetime import datetime
+        from eva.capabilities.quick_actions import (
+            BatteryStatusCapability,
+            TellDateCapability,
+            TellTimeCapability,
+            VolumeUpCapability,
+        )
+        sent = []
+        reg = CapabilityRegistry()
+        reg.register(TellTimeCapability(now_fn=lambda: datetime(2026, 10, 27, 15, 5)))
+        reg.register(TellDateCapability(now_fn=lambda: datetime(2026, 10, 27, 15, 5)))
+        reg.register(BatteryStatusCapability(reader=lambda: {"ac": 1, "flag": 8, "percent": 80, "seconds": 0xFFFFFFFF}))
+        reg.register(VolumeUpCapability(sender=lambda vk, count: sent.append((vk, count))))
+
+        gateway = FakeGateway()
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway)
+        core = EvaCore(registry=reg, planner=planner)
+
+        r_time = core.handle(req("what time is it"))
+        self.assertEqual(r_time.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(r_time.capability, "tell_time")
+        self.assertEqual(r_time.reply, "It is 3:05 PM.")
+
+        r_date = core.handle(req("what's the date"))
+        self.assertEqual(r_date.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(r_date.capability, "tell_date")
+        self.assertIn("Tuesday", r_date.reply)
+
+        r_bat = core.handle(req("battery level"))
+        self.assertEqual(r_bat.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(r_bat.capability, "battery_status")
+        self.assertIn("80 percent", r_bat.reply)
+
+        r_vol = core.handle(req("volume up"))
+        self.assertEqual(r_vol.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(r_vol.capability, "volume_up")
+        self.assertEqual(len(sent), 1)
+
+        self.assertEqual(len(gateway.calls), 0)
+
+    def test_multistep_quick_command_uses_planner_and_passes_steps(self):
+        import json
+        from datetime import datetime
+        from eva.capabilities.quick_actions import TellTimeCapability, VolumeDownCapability
+        sent = []
+        reg = CapabilityRegistry()
+        reg.register(TellTimeCapability(now_fn=lambda: datetime(2026, 10, 27, 15, 5)))
+        reg.register(VolumeDownCapability(sender=lambda vk, count: sent.append((vk, count))))
+
+        plan = {
+            "kind": "plan",
+            "steps": [
+                {"capability": "tell_time", "args": {}},
+                {"capability": "volume_down", "args": {"steps": 10}},
+            ],
+            "confidence": 0.95,
+            "reply": "Told time and lowered volume.",
+        }
+        gateway = FakeGateway(reply=json.dumps(plan))
+        planner = Planner(settings=BrainSettings(api_key="k"), gateway=gateway)
+        core = EvaCore(registry=reg, planner=planner)
+
+        r = core.handle(req("what time is it and volume down"))
+        self.assertEqual(r.outcome, TaskOutcome.SUCCESS)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1], 10)
+        self.assertEqual(len(gateway.calls), 1)
+
 
 
 if __name__ == "__main__":

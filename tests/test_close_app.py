@@ -307,9 +307,11 @@ class CoreIntegrationTests(unittest.TestCase):
         reg = CapabilityRegistry()
         register_default_capabilities(reg, probe=FakeProbe(), app_settings=AppSettings(data_dir=tmp.name),
                                       refresh_apps=False)
-        self.assertEqual(reg.names(), ["open_app", "open_file", "close_app", "clock"])
+        self.assertEqual(reg.names(), ["open_app", "open_file", "close_app", "open_url", "web_search",
+                                       "tell_time", "tell_date", "battery_status",
+                                       "volume_up", "volume_down", "volume_mute", "take_screenshot"])
         for phrase, expected in [("close notepad", "close_app"), ("close spotify", "close_app"),
-                                 ("close this", "close_app"), ("what time is it", "clock")]:
+                                 ("close this", "close_app"), ("what time is it", "tell_time")]:
             found = [c.name for c, _ in reg.find(req(phrase))]
             self.assertEqual(found, [expected], phrase)
 
